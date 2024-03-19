@@ -34,9 +34,9 @@ infinite_cache8 = LRUCache(maxsize=10000)
 # 默认采样率
 default_sr = 3200
 default_dbfs = -25
-default_dtw_pass = 0.8
-default_silence_min_duration = 350
-default_silence_threshold = -30
+default_dtw_pass = 0.75
+default_silence_min_duration = 400
+default_silence_threshold = -40
 
 app = FastAPI()
 
@@ -48,7 +48,7 @@ logger.add('logs/warn.log', rotation='1 days', compression='zip', enqueue=True,
            format='<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>',
            retention='90 days', encoding='utf8', level="WARNING")
 
-fibonacci_array = [0, 3, 5, 7, 9, 7, 5, 5, 5, 3, 3]
+fibonacci_array = [2, 3, 5, 8, 13, 8, 5, 3, 2]
 
 
 def fibonacci(n):
@@ -130,7 +130,6 @@ def split_audio(ringFile: str = Form(...), type: str = Form(...)):
         segments = spilt_audio_to_file(target_file, os.path.splitext(os.path.basename(target_file))[0], type)
 
     return str(f"模板音频共拆分: {segments}份，文件保存相对路径: output/{type}")
-
 
 @app.post('/beatCompare')
 def beat_compare(ringFile: str = Form(...), templateFile: str = Form(...)):
@@ -590,20 +589,22 @@ def spilt_audio_to_file(target_file, file_name, type):
         silence_min_duration -= tempo
     elif tempo / min_beat_frame > 3:
         silence_min_duration -= tempo
+    elif max_beat_frame / min_beat_frame > 3:
+        silence_min_duration -= tempo
 
     logger.info(f"silence_min_duration: {silence_min_duration} ")
-    filtered_segments, segments = filter_seg(audio, int(silence_min_duration), audio.max_dBFS, file_name)
+    filtered_segments, segments = filter_seg(audio, int(silence_min_duration), audio.max_dBFS,max_beat_frame, file_name)
     logger.info("filtered_segments程序执行耗时: {:.2f} 秒".format(time.time() - start_time))
-    # for i, segment in enumerate(filtered_segments):
-    #     output_file = f"output/{type}/{file_name}_{i}.mp3"  # 设置输出文件名
-    #     segment.export(output_file, format='mp3')
+    for i, segment in enumerate(filtered_segments):
+        output_file = f"output/{type}/{file_name}_{i}.mp3"  # 设置输出文件名
+        segment.export(output_file, format='mp3')
     logger.info("for程序执行耗时: {:.2f} 秒".format(time.time() - start_time))
-    # for i, segment in enumerate(segments):
-    #     output_file = f"output/{type}/{file_name}_se_{i}.mp3"  # 设置输出文件名
-    #     output_dir = f"output/{type}"  # 设置输出文件名
-    #     if not os.path.exists(output_dir):
-    #         os.makedirs(output_dir)
-    #     segment.export(output_file, format='mp3')
+    for i, segment in enumerate(segments):
+        output_file = f"output/{type}/{file_name}_se_{i}.mp3"  # 设置输出文件名
+        output_dir = f"output/{type}"  # 设置输出文件名
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        segment.export(output_file, format='mp3')
 
     # logger.info(f"模板音频:{file_name}已被拆分: {len(filtered_segments)}份")
     return len(filtered_segments)
@@ -657,6 +658,9 @@ def get_spilt_audio(file, file_name, type, duration=None):
         silence_min_duration -= tempo
     elif tempo / min_beat_frame > 3:
         silence_min_duration -= tempo
+    elif max_beat_frame / min_beat_frame > 3:
+        silence_min_duration -= tempo
+
 
     # silence_min_duration = default_silence_min_duration - tempo
     # if max_beat_frame < 200:
@@ -676,7 +680,7 @@ def get_spilt_audio(file, file_name, type, duration=None):
     # if silence_min_duration > 600:
     #     silence_min_duration = 600
 
-    filtered_segments, segments = filter_seg(audio, int(silence_min_duration), audio.max_dBFS)
+    filtered_segments, segments = filter_seg(audio, int(silence_min_duration), audio.max_dBFS,max_beat_frame)
     logger.info("filter_seg程序执行耗时: {:.2f} 秒".format(time.time() - begin_time))
     array = []
     correlations = []
@@ -705,12 +709,17 @@ def get_spilt_audio(file, file_name, type, duration=None):
     return array, correlations
 
 
-def filter_seg(audio, silence_min_duration=400, diff_db=-5, file_name=None):
+def filter_seg(audio, silence_min_duration=400, diff_db=-5,max_beat=None, file_name=None):
     # 静默阈值（以分贝为单位）
     # silence_threshold =default_silence_threshold
     silence_threshold = int(default_silence_threshold + (diff_db / 2 if diff_db > -7 else 0))
     # silence_threshold = default_silence_threshold + diff_db / 2
     logger.info(f'silence_threshold:{silence_threshold}')
+    #说的很快 应该要增大截取静默时间
+    if max_beat:
+        silence_min_duration + max_beat/4
+    if silence_min_duration > 550 :
+        silence_min_duration = 550
 
     # 静默持续时间（毫秒）
     # silence_min_duration = 400
@@ -752,7 +761,11 @@ def get_filter_seg(audio, silence_threshold, silence_min_duration, filter_size=1
 
     # 放弃长度小于1.5秒的录音片段 放弃长度过大的
     filtered_segments = [segment for segment in segments if
-                         (len(segment) >= filter_size) and (len(segment) < 10000)]
+                         (len(segment) >= filter_size)  and (len(segment) < 10000)]
+    if len(filtered_segments) >=2:
+        filtered_segments.extend([segment for segment in segments if
+                                  (len(segment) < filter_size)  and (filter_size - len(segment)<300) and (len(segment) < 10000)])
+
     return filtered_segments, segments
 
 
@@ -1085,7 +1098,7 @@ def audio_cosine(target_audio, target_sr, compare_audio, compare_sr):
     return similarity
 
 
-initCache("/home/guest/audioCompare/music_retrieve/music_base")
+# initCache("/home/guest/audioCompare/music_retrieve/music_base")
 # server = pywsgi.WSGIServer(('0.0.0.0', 5000), app)
 # server.serve_forever()
 # if __name__ == '__main__':
